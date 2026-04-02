@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Z-ProxMon</title>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        h2 {
+            margin-top: 30px;
+            border-bottom: 2px solid #ccc;
+            padding-bottom: 5px;
+        }
+
+        table {
+            border: 1px solid black;
+            border-collapse: collapse;
+            width: 100%;
+            max-width: 1200px;
+            margin-bottom: 20px;
+        }
+
+        th, td {
+            border: 1px solid black;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+<h1>Z-ProxMon Dashboard</h1>
+
+<h2>Node Overview</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Uptime</th>
+        <th>Global CPU Usage</th>
+        <th>IO Delay</th>
+        <th>RAM Usage</th>
+        <th>Swap Usage</th>
+    </tr>
+    </thead>
+    <tbody id="overview-tbody"></tbody>
+</table>
+
+<h2>GPUs</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Name</th>
+        <th>Utilization</th>
+        <th>Temperature (°C)</th>
+        <th>Power (W)</th>
+        <th>VRAM Usage</th>
+    </tr>
+    </thead>
+    <tbody id="gpus-tbody"></tbody>
+</table>
+
+<h2>GPU Processes</h2>
+<table>
+    <thead>
+    <tr>
+        <th>GPU</th>
+        <th>PID</th>
+        <th>Process Name</th>
+        <th>VRAM Used</th>
+        <th>LXC VM ID</th>
+        <th>LXC Name</th>
+        <th>Docker Container Name</th>
+    </tr>
+    </thead>
+    <tbody id="gpu-processes-tbody"></tbody>
+</table>
+
+<h2>Temperatures</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Sensor Label</th>
+        <th>Current (°C)</th>
+        <th>Max (°C)</th>
+        <th>Critical (°C)</th>
+    </tr>
+    </thead>
+    <tbody id="temps-tbody"></tbody>
+</table>
+
+<h2>Physical Disks</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Name</th>
+        <th>Mount Point</th>
+        <th>File System</th>
+        <th>Usage</th>
+        <th>Used / Total</th>
+    </tr>
+    </thead>
+    <tbody id="disks-tbody"></tbody>
+</table>
+
+<h2>LXC Containers</h2>
+<table>
+    <thead>
+    <tr>
+        <th>VM ID</th>
+        <th>Name</th>
+        <th>PID</th>
+        <th>CPU Usage</th>
+        <th>RAM Usage</th>
+        <th>Disk Usage</th>
+    </tr>
+    </thead>
+    <tbody id="lxc-tbody"></tbody>
+</table>
+
+<h2>CPU Cores</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Core</th>
+        <th>Vendor / Brand</th>
+        <th>Frequency</th>
+        <th>Usage</th>
+    </tr>
+    </thead>
+    <tbody id="cpus-tbody"></tbody>
+</table>
+
+<h2>Top 10 Processes (CPU)</h2>
+<table>
+    <thead>
+    <tr>
+        <th>PID</th>
+        <th>Process Name</th>
+        <th>CPU Usage</th>
+        <th>RAM Usage</th>
+        <th>LXC VM ID</th>
+        <th>LXC Name</th>
+        <th>Docker Container Name</th>
+    </tr>
+    </thead>
+    <tbody id="top-processes-tbody"></tbody>
+</table>
+
+<script>
+    function listen() {
+        const eventSource = new EventSource('sse')
+
+        eventSource.addEventListener('stats', event => {
+            const stats = JSON.parse(event.data)
+
+            // 1. Update Node Overview
+            const overviewBody = document.createElement('tbody')
+            overviewBody.id = 'overview-tbody'
+            overviewBody.innerHTML = `
+                <tr>
+                    <td>${formatUptime(stats.base.uptime)}</td>
+                    <td>${formatPercentage(stats.base.cpu_usage, false)}</td>
+                    <td>${formatPercentage(stats.proxmox.io_delay, false)}</td>
+                    <td>${formatStorageStats(stats.base.ram)}</td>
+                    <td>${formatStorageStats(stats.base.swap)}</td>
+                </tr>
+            `
+            document.getElementById('overview-tbody').replaceWith(overviewBody)
+
+            // 2. Update GPUs
+            const gpusBody = document.createElement('tbody')
+            gpusBody.id = 'gpus-tbody'
+            const gpus = stats.gpus || []
+            if (gpus.length === 0) {
+                gpusBody.innerHTML = `<tr><td colspan="5">No GPU data available</td></tr>`
+            } else {
+                for (const gpu of gpus) {
+                    gpusBody.innerHTML += `
+                        <tr>
+                            <td><strong>${gpu.name}</strong></td>
+                            <td>${formatPercentage(gpu.utilization)}</td>
+                            <td>${gpu.temperature != null ? gpu.temperature : 'N/A'}</td>
+                            <td>${gpu.power_usage_watts != null ? gpu.power_usage_watts.toFixed(1) + 'W' : 'N/A'}</td>
+                            <td>${formatStorageStats(gpu.memory, false)}</td>
+                        </tr>
+                    `
+                }
+            }
+            document.getElementById('gpus-tbody').replaceWith(gpusBody)
+
+            // 3. Update GPU Processes
+            const gpuProcessesBody = document.createElement('tbody')
+            gpuProcessesBody.id = 'gpu-processes-tbody'
+            let hasProcesses = false
+            for (const gpu of gpus) {
+                for (const proc of (gpu.processes || [])) {
+                    hasProcesses = true
+                    const lxcId = proc.lxc_vm_id != null ? proc.lxc_vm_id : 'Host'
+                    const lxcName = proc.lxc_name != null ? proc.lxc_name : 'N/A'
+                    const dockerName = proc.docker_container_name != null ? proc.docker_container_name : 'N/A'
+                    const memUsed = proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'
+
+                    gpuProcessesBody.innerHTML += `
+                        <tr>
+                            <td>${gpu.name}</td>
+                            <td>${proc.pid}</td>
+                            <td>${proc.process_name}</td>
+                            <td>${memUsed}</td>
+                            <td>${lxcId}</td>
+                            <td><strong>${lxcName}</strong></td>
+                            <td><strong>${dockerName}</strong></td>
+                        </tr>
+                    `
+                }
+            }
+            if (!hasProcesses) {
+                gpuProcessesBody.innerHTML = `<tr><td colspan="6">No GPU processes found</td></tr>`
+            }
+            document.getElementById('gpu-processes-tbody').replaceWith(gpuProcessesBody)
+
+            // 4. Update Temperatures
+            const tempsBody = document.createElement('tbody')
+            tempsBody.id = 'temps-tbody'
+            const temps = stats.temperatures || []
+            if (temps.length === 0) {
+                tempsBody.innerHTML = `<tr><td colspan="4">No temperature data available</td></tr>`
+            } else {
+                for (const t of temps) {
+                    tempsBody.innerHTML += `
+                        <tr>
+                            <td>${t.label}</td>
+                            <td>${t.current != null ? t.current.toFixed(1) : 'N/A'}</td>
+                            <td>${t.max != null ? t.max.toFixed(1) : 'N/A'}</td>
+                            <td>${t.critical != null ? t.critical.toFixed(1) : 'N/A'}</td>
+                        </tr>
+                    `
+                }
+            }
+            document.getElementById('temps-tbody').replaceWith(tempsBody)
+
+            // 5. Update Physical Disks
+            const disksBody = document.createElement('tbody')
+            disksBody.id = 'disks-tbody'
+            for (const d of (stats.disks || [])) {
+                disksBody.innerHTML += `
+                    <tr>
+                        <td>${d.name}</td>
+                        <td>${d.mount_point}</td>
+                        <td>${d.file_system}</td>
+                        <td>${formatPercentage(d.stats.usage)}</td>
+                        <td>${humanFileSize(d.stats.used)} / ${humanFileSize(d.stats.total)}</td>
+                    </tr>
+                `
+            }
+            document.getElementById('disks-tbody').replaceWith(disksBody)
+
+            // 6. Update LXC Containers
+            const lxcBody = document.createElement('tbody')
+            lxcBody.id = 'lxc-tbody'
+            const lxcs = stats.proxmox.lxc || []
+            if (lxcs.length === 0) {
+                lxcBody.innerHTML = `<tr><td colspan="6">No LXC containers found</td></tr>`
+            } else {
+                for (const lxc of lxcs) {
+                    lxcBody.innerHTML += `
+                        <tr>
+                            <td>${lxc.vm_id}</td>
+                            <td><strong>${lxc.name}</strong></td>
+                            <td>${lxc.pid}</td>
+                            <td>${formatPercentage(lxc.base.cpu_usage)}</td>
+                            <td>${formatStorageStats(lxc.base.ram)}</td>
+                            <td>${formatStorageStats(lxc.disk.stats)}</td>
+                        </tr>
+                    `
+                }
+            }
+            document.getElementById('lxc-tbody').replaceWith(lxcBody)
+
+            // 7. Update CPU Cores
+            const cpusBody = document.createElement('tbody')
+            cpusBody.id = 'cpus-tbody'
+            for (const cpu of (stats.base.cpus || [])) {
+                cpusBody.innerHTML += `
+                    <tr>
+                        <td>${cpu.name}</td>
+                        <td>${cpu.vendor_id} ${cpu.brand}</td>
+                        <td>${cpu.frequency} MHz</td>
+                        <td>${formatPercentage(cpu.usage, false)}</td>
+                    </tr>
+                `
+            }
+            document.getElementById('cpus-tbody').replaceWith(cpusBody)
+
+            // 8. Update Top Processes
+            const topProcBody = document.createElement('tbody')
+            topProcBody.id = 'top-processes-tbody'
+            const topProcesses = stats.processes || []
+
+            if (topProcesses.length === 0) {
+                topProcBody.innerHTML = `<tr><td colspan="4">No process data available</td></tr>`
+            } else {
+                for (const proc of topProcesses) {
+                    const lxcId = proc.lxc_vm_id != null ? proc.lxc_vm_id : 'Host'
+                    const lxcName = proc.lxc_name != null ? proc.lxc_name : 'N/A'
+                    const dockerName = proc.docker_container_name != null ? proc.docker_container_name : 'N/A'
+
+                    topProcBody.innerHTML += `
+                        <tr>
+                            <td>${proc.pid}</td>
+                            <td><strong>${proc.name}</strong></td>
+                            <td>${formatPercentage(proc.cpu_usage, false)}</td>
+                            <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
+                            <td>${lxcId}</td>
+                            <td><strong>${lxcName}</strong></td>
+                            <td><strong>${dockerName}</strong></td>
+                        </tr>
+                    `
+                }
+            }
+            document.getElementById('top-processes-tbody').replaceWith(topProcBody)
+        })
+    }
+
+    document.addEventListener('DOMContentLoaded', listen)
+
+    // --- Helper Functions ---
+
+    function formatPercentage(value, multiply = true) {
+        if (value == null) return 'N/A'
+        // parseFloat strips trailing zeros after toFixed forces the 2 decimals
+        if (multiply) {
+            value = value * 100
+        }
+        return parseFloat(value.toFixed(2)) + '%'
+    }
+
+    function formatStorageStats(storageObj, multiply = true) {
+        if (!storageObj) return "N/A"
+        const usageStr = formatPercentage(storageObj.usage, multiply)
+        return `${humanFileSize(storageObj.used)} / ${humanFileSize(storageObj.total)} (${usageStr})`
+    }
+
+    function formatUptime(seconds) {
+        if (seconds == null) return "N/A"
+        const d = Math.floor(seconds / (3600 * 24))
+        const h = Math.floor(seconds % (3600 * 24) / 3600)
+        const m = Math.floor(seconds % 3600 / 60)
+        return `${d}d ${h}h ${m}m`
+    }
+
+    // Taken from https://stackoverflow.com/a/14919494
+    function humanFileSize(bytes, si = false, dp = 1) {
+        if (bytes == null) return "0 B"
+        const thresh = si ? 1000 : 1024
+        if (Math.abs(bytes) < thresh) return bytes + ' B'
+        const units = si
+            ? ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+            : ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB']
+        let u = -1
+        const r = 10 ** dp
+        do {
+            bytes /= thresh
+            ++u
+        } while (Math.round(Math.abs(bytes) * r) / r >= thresh && u < units.length - 1)
+        return bytes.toFixed(dp) + ' ' + units[u]
+    }
+</script>
+</body>
+</html>
