@@ -110,6 +110,7 @@ pub async fn monitor(state: &State) {
 
         {
             let mut stats = state.stats.write_async().await;
+            stats.updated_at = Some(time::OffsetDateTime::now_utc());
             stats.update_system(&system);
             stats.update_disks(&disks);
             stats.update_components(&components);
@@ -153,6 +154,6 @@ pub async fn monitor(state: &State) {
             }
         }
 
-        compio::time::sleep(std::time::Duration::from_secs(1)).await;
+        compio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }

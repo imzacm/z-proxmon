@@ -11,12 +11,22 @@ use futures_util::Stream;
 use triomphe::Arc;
 
 use crate::monitor::State as MonitorState;
+use crate::monitor_log::MonitorLog;
 
-pub async fn start_server(port: u16, state: Arc<MonitorState>) {
+#[derive(Clone)]
+struct ServerState {
+    state: Arc<MonitorState>,
+    monitor_log: MonitorLog,
+}
+
+unsafe impl Send for ServerState {}
+unsafe impl Sync for ServerState {}
+
+pub async fn start_server(port: u16, state: Arc<MonitorState>, monitor_log: MonitorLog) {
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/sse", get(sse_handler))
-        .with_state(state);
+        .with_state(ServerState { state, monitor_log });
 
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("Listening on http://{address}");
@@ -29,7 +39,7 @@ async fn root_handler() -> Html<&'static str> {
 }
 
 async fn sse_handler(
-    State(state): State<Arc<MonitorState>>,
+    State(ServerState { state, monitor_log }): State<ServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = z_queue::defaults::bounded(NonZeroUsize::MIN);
 
@@ -39,23 +49,50 @@ async fn sse_handler(
         let _guard = state.add_listener();
 
         let mut prev_hash = [0u8; blake3::OUT_LEN];
+        let mut json = String::new();
+
+        {
+            let mut cursor = monitor_log.cursor().await.expect("Failed to create log cursor");
+            while let Some(stats) = cursor.next().await.expect("Failed to read log") {
+                let mut bytes = json.into_bytes();
+                serde_json::to_writer(&mut bytes, &stats).unwrap();
+                json = unsafe { String::from_utf8_unchecked(bytes) };
+
+                let hash = blake3::hash(json.as_bytes());
+                if hash != prev_hash {
+                    prev_hash = *hash.as_bytes();
+
+                    let event = Event::default().event("stats").data(&json);
+                    if tx.send_async(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+
+                json.clear();
+            }
+        }
+
         loop {
             let stats_listener = state.stats.observe();
 
-            let json = {
+            {
                 let stats = state.stats.latest_value_async().await;
-                serde_json::to_string(&*stats).unwrap()
-            };
+                let mut bytes = json.into_bytes();
+                serde_json::to_writer(&mut bytes, &*stats).unwrap();
+                json = unsafe { String::from_utf8_unchecked(bytes) };
+            }
 
             let hash = blake3::hash(json.as_bytes());
             if hash != prev_hash {
                 prev_hash = *hash.as_bytes();
 
-                let event = Event::default().event("stats").data(json);
+                let event = Event::default().event("stats").data(&json);
                 if tx.send_async(Ok(event)).await.is_err() {
                     break;
                 }
             }
+
+            json.clear();
 
             stats_listener.await;
         }

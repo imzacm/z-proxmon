@@ -6,9 +6,12 @@ mod get_stats;
 mod http_server;
 mod io_wait;
 mod monitor;
+mod monitor_log;
 mod nvidia;
 mod proxmox;
 mod structures;
+
+use std::task::Poll;
 
 use triomphe::Arc;
 
@@ -50,8 +53,20 @@ fn main() {
         .expect("Failed to create compio runtime")
         .block_on(async move {
             let state: Arc<monitor::State> = Arc::default();
-            let monitor_future = monitor::monitor(&state);
-            let server_future = http_server::start_server(port, state.clone());
+            let mut monitor_future = std::pin::pin!(monitor::monitor(&state));
+
+            // Poll once so it starts waiting for a listener - MonitorLog will be it's first
+            // listener.
+            std::future::poll_fn(|cx| match monitor_future.as_mut().poll(cx) {
+                Poll::Ready(()) => panic!("Monitor future should not have finished after one poll"),
+                Poll::Pending => Poll::Ready(()),
+            })
+            .await;
+
+            let monitor_log = monitor_log::MonitorLog::new(state.clone())
+                .await
+                .expect("Failed to create monitor log");
+            let server_future = http_server::start_server(port, state.clone(), monitor_log);
 
             futures_util::join!(monitor_future, server_future);
         })

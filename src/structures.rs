@@ -87,7 +87,6 @@ pub struct GpuProcessStats {
     pub pid: u32,
     pub process_name: String,
     pub memory_used: Option<u64>,
-    #[serde(flatten)]
     pub cgroup_info: ProcessCGroupInfo,
 }
 
@@ -107,12 +106,13 @@ pub struct ProcessStats {
     pub name: String,
     pub cpu_usage: f32,
     pub memory_used: u64,
-    #[serde(flatten)]
     pub cgroup_info: ProcessCGroupInfo,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemStats {
+    #[serde(with = "time::serde::timestamp::option")]
+    pub updated_at: Option<time::OffsetDateTime>,
     pub base: BaseSystemStats,
     pub disks: Vec<DiskStats>,
     pub temperatures: Vec<TemperatureStats>,

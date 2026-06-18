@@ -10,16 +10,19 @@ serde_json = "1"
 triomphe = "0.1"
 blake3 = "1.8"
 
-compio = { version = "0.18", features = ["fs", "process"] }
+compio = { version = "0.19", features = ["fs", "process"] }
 futures-util = "0.3"
 
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json"] }
-cyper-axum = { version = "0.8", features = ["http2"] }
+cyper-axum = { version = "0.9", features = ["http2"] }
 
-sysinfo = { version = "0.38", features = ["serde"] }
+sysinfo = { version = "0.39", features = ["serde"] }
 nvml-wrapper = "0.12"
 
-z-sync = { git = "https://github.com/imzacm/z-sync.git", rev = "9fb77ceced2224064d19a8d80f60248c8bb7cca6" }
-z-queue = { git = "https://github.com/imzacm/z-queue.git", rev = "4e8f471fe38a2e66868c9f59b3a4c016bfb97daf", features = ["triomphe", "stream"] }
+z-sync = { git = "https://github.com/imzacm/z-sync.git", rev = "f533de87fdc246afe66bfcbfbfad556b49711e4d" }
+z-queue = { git = "https://github.com/imzacm/z-queue.git", rev = "7015e5d7de06c15a6a5c36e02619e3d3b0084005", features = ["triomphe", "stream"] }
 
-lru = "0.16"
+lru = "0.18"
+tempfile = "3.27"
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
+bincode = { version = "2.0.1", features = ["serde"] }

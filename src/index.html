@@ -4,6 +4,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Z-ProxMon</title>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
     <style>
         body {
             font-family: sans-serif;
@@ -33,6 +36,20 @@
         th {
             background-color: #f2f2f2;
         }
+
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+            max-width: 1200px;
+        }
+
+        .chart-box {
+            border: 1px solid black;
+            padding: 10px;
+            background-color: #f9f9f9;
+        }
     </style>
 </head>
 <body>
@@ -51,6 +68,41 @@
     </thead>
     <tbody id="overview-tbody"></tbody>
 </table>
+
+<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px; max-width: 1200px;">
+    <h2 style="margin-bottom: 0; border-bottom: none;">Historical Performance</h2>
+    <select id="timeRange" style="padding: 5px; font-size: 14px;">
+        <option value="60000">Last 1 Minute</option>
+        <option value="120000">Last 2 Minutes</option>
+        <option value="300000">Last 5 Minutes</option>
+        <option value="600000">Last 10 Minutes</option>
+        <option value="900000">Last 15 Minutes</option>
+        <option value="1800000">Last 30 Minutes</option>
+        <option value="3600000" selected>Last 1 Hour</option>
+        <option value="21600000">Last 6 Hours</option>
+        <option value="86400000">Last 24 Hours</option>
+    </select>
+</div>
+<div class="charts-container">
+    <div class="chart-box">
+        <canvas id="cpuChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="ramChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="gpuChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="gpuMemChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="tempChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="diskChart"></canvas>
+    </div>
+</div>
 
 <h2>GPUs</h2>
 <table>
@@ -154,191 +206,312 @@
 </table>
 
 <script>
-    function listen() {
+    document.addEventListener('DOMContentLoaded', () => {
+        const dom = {
+            overview: document.getElementById('overview-tbody'),
+            gpus: document.getElementById('gpus-tbody'),
+            gpuProcesses: document.getElementById('gpu-processes-tbody'),
+            temps: document.getElementById('temps-tbody'),
+            disks: document.getElementById('disks-tbody'),
+            lxc: document.getElementById('lxc-tbody'),
+            cpus: document.getElementById('cpus-tbody'),
+            topProcesses: document.getElementById('top-processes-tbody'),
+            timeRange: document.getElementById('timeRange')
+        }
+
+        // --- Chart Setup ---
+        let currentWindowMs = parseInt(dom.timeRange.value, 10)
+        const MAX_HISTORY_MS = 86400000 // Keep a maximum of 24 hours in memory to prevent crashes
+
+        // Track the latest timestamp received from the server
+        let latestDataTime = Date.now()
+
+        const chartColors = ['#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40', '#E7E9ED', '#8A2BE2', '#00FA9A']
+        const getColor = (index) => chartColors[index % chartColors.length]
+
+        const percentScales = {min: 0, max: 100}
+        const autoScales = {beginAtZero: true}
+
+        const createChart = (canvasId, label, isPercent = true) => {
+            return new Chart(document.getElementById(canvasId).getContext('2d'), {
+                type: 'line',
+                data: {datasets: []},
+                options: {
+                    responsive: true,
+                    animation: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        title: {display: true, text: label},
+                        tooltip: {enabled: true}
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                tooltipFormat: 'HH:mm:ss',
+                                displayFormats: {minute: 'HH:mm'}
+                            }
+                        },
+                        y: isPercent ? percentScales : autoScales
+                    },
+                    elements: {
+                        point: {radius: 0, hitRadius: 10, hoverRadius: 4}
+                    }
+                }
+            })
+        }
+
+        const cpuChart = createChart('cpuChart', 'Global CPU Usage (%)')
+        const ramChart = createChart('ramChart', 'RAM Usage (%)')
+        const gpuChart = createChart('gpuChart', 'GPU Utilization (%)')
+        const gpuMemChart = createChart('gpuMemChart', 'GPU VRAM Usage (%)')
+        const tempChart = createChart('tempChart', 'Temperatures (°C)', false)
+        const diskChart = createChart('diskChart', 'Disk Usage (%)')
+
+        const allCharts = [cpuChart, ramChart, gpuChart, gpuMemChart, tempChart, diskChart]
+
+        cpuChart.data.datasets.push({label: 'CPU', data: [], borderColor: getColor(0), tension: 0.1})
+        ramChart.data.datasets.push({label: 'RAM', data: [], borderColor: getColor(1), tension: 0.1})
+
+        // Instantly update chart zoom when dropdown changes, relative to the server's latest time
+        dom.timeRange.addEventListener('change', (e) => {
+            currentWindowMs = parseInt(e.target.value, 10)
+            const displayCutoff = latestDataTime - currentWindowMs
+
+            allCharts.forEach(c => {
+                c.options.scales.x.min = displayCutoff
+                c.options.scales.x.max = latestDataTime
+                c.update()
+            })
+        })
+
+        const updateDynamicChart = (chart, dataItems, labelKey, valueFn, timestamp) => {
+            dataItems.forEach(item => {
+                const label = item[labelKey]
+                let dataset = chart.data.datasets.find(ds => ds.label === label)
+
+                if (!dataset) {
+                    dataset = {
+                        label: label,
+                        data: [],
+                        borderColor: getColor(chart.data.datasets.length),
+                        tension: 0.1
+                    }
+                    chart.data.datasets.push(dataset)
+                }
+
+                insertSortedAndDedup(dataset.data, { x: timestamp, y: valueFn(item) })
+            })
+        }
+
+
+        // --- SSE Listener ---
         const eventSource = new EventSource('sse')
 
         eventSource.addEventListener('stats', event => {
             const stats = JSON.parse(event.data)
 
-            // 1. Update Node Overview
-            const overviewBody = document.createElement('tbody')
-            overviewBody.id = 'overview-tbody'
-            overviewBody.innerHTML = `
-                <tr>
-                    <td>${formatUptime(stats.base.uptime)}</td>
-                    <td>${formatPercentage(stats.base.cpu_usage, false)}</td>
-                    <td>${formatPercentage(stats.proxmox.io_delay, false)}</td>
-                    <td>${formatStorageStats(stats.base.ram)}</td>
-                    <td>${formatStorageStats(stats.base.swap)}</td>
-                </tr>
+            // Extract and parse the server-side timestamp
+            if (stats.updated_at) {
+                // Handle Unix timestamp in seconds vs milliseconds or ISO Strings
+                if (typeof stats.updated_at === 'number' && stats.updated_at < 20000000000) {
+                    latestDataTime = stats.updated_at * 1000
+                } else {
+                    latestDataTime = new Date(stats.updated_at).getTime()
+                }
+            } else {
+                latestDataTime = Date.now() // Fallback
+            }
+
+            // Define the visible window and the maximum memory window based on server time
+            const displayCutoff = latestDataTime - currentWindowMs
+            const memoryCutoff = latestDataTime - MAX_HISTORY_MS
+
+            // 1. Update Chart Data
+            insertSortedAndDedup(
+                cpuChart.data.datasets[0].data,
+                { x: latestDataTime, y: stats.base?.cpu_usage ?? 0 }
+            )
+            const ramPercent = stats.base?.ram ? (stats.base.ram.used / stats.base.ram.total) * 100 : 0
+            insertSortedAndDedup(
+                ramChart.data.datasets[0].data,
+                { x: latestDataTime, y: ramPercent }
+            )
+
+            updateDynamicChart(gpuChart, stats.gpus ?? [], 'name', g => g.utilization ?? 0, latestDataTime)
+            updateDynamicChart(gpuMemChart, stats.gpus ?? [], 'name', g => g.memory?.usage ?? 0, latestDataTime)
+            updateDynamicChart(tempChart, stats.temperatures ?? [], 'label', t => t.current ?? null, latestDataTime)
+            updateDynamicChart(diskChart, stats.disks ?? [], 'name', d => (d.stats?.usage ?? 0) * 100, latestDataTime)
+
+            // Prune data and lock axes
+            allCharts.forEach(c => {
+                c.options.scales.x.min = displayCutoff
+                c.options.scales.x.max = latestDataTime
+
+                // Shift data points that fall completely out of memory bounds
+                c.data.datasets.forEach(ds => {
+                    while (ds.data.length > 0 && ds.data[0].x < memoryCutoff) {
+                        ds.data.shift()
+                    }
+                })
+                c.update()
+            })
+
+            // 2. Update Node Overview
+            dom.overview.innerHTML = `
+            <tr>
+                <td>${formatUptime(stats.base?.uptime)}</td>
+                <td>${formatPercentage(stats.base?.cpu_usage, false)}</td>
+                <td>${formatPercentage(stats.proxmox?.io_delay, false)}</td>
+                <td>${formatStorageStats(stats.base?.ram)}</td>
+                <td>${formatStorageStats(stats.base?.swap)}</td>
+            </tr>
             `
-            document.getElementById('overview-tbody').replaceWith(overviewBody)
 
-            // 2. Update GPUs
-            const gpusBody = document.createElement('tbody')
-            gpusBody.id = 'gpus-tbody'
-            const gpus = stats.gpus || []
-            if (gpus.length === 0) {
-                gpusBody.innerHTML = `<tr><td colspan="5">No GPU data available</td></tr>`
-            } else {
-                for (const gpu of gpus) {
-                    gpusBody.innerHTML += `
-                        <tr>
-                            <td><strong>${gpu.name}</strong></td>
-                            <td>${formatPercentage(gpu.utilization)}</td>
-                            <td>${gpu.temperature != null ? gpu.temperature : 'N/A'}</td>
-                            <td>${gpu.power_usage_watts != null ? gpu.power_usage_watts.toFixed(1) + 'W' : 'N/A'}</td>
-                            <td>${formatStorageStats(gpu.memory, false)}</td>
-                        </tr>
-                    `
-                }
-            }
-            document.getElementById('gpus-tbody').replaceWith(gpusBody)
+            // 3. Update GPUs
+            const gpus = stats.gpus ?? []
+            dom.gpus.innerHTML = gpus.length === 0
+                ? `<tr><td colspan="5">No GPU data available</td></tr>`
+                : gpus.map(gpu => `
+                <tr>
+                    <td><strong>${gpu.name}</strong></td>
+                    <td>${formatPercentage(gpu.utilization, false)}</td>
+                    <td>${gpu.temperature ?? 'N/A'}</td>
+                    <td>${gpu.power_usage_watts != null ? gpu.power_usage_watts.toFixed(1) + 'W' : 'N/A'}</td>
+                    <td>${formatStorageStats(gpu.memory, false)}</td>
+                </tr>
+            `).join('')
 
-            // 3. Update GPU Processes
-            const gpuProcessesBody = document.createElement('tbody')
-            gpuProcessesBody.id = 'gpu-processes-tbody'
-            let hasProcesses = false
+            // 4. Update GPU Processes
+            const gpuProcsHtml = []
             for (const gpu of gpus) {
-                for (const proc of (gpu.processes || [])) {
-                    hasProcesses = true
-                    const lxcId = proc.lxc_vm_id != null ? proc.lxc_vm_id : 'Host'
-                    const lxcName = proc.lxc_name != null ? proc.lxc_name : 'N/A'
-                    const dockerName = proc.docker_container_name != null ? proc.docker_container_name : 'N/A'
-                    const memUsed = proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'
-
-                    gpuProcessesBody.innerHTML += `
-                        <tr>
-                            <td>${gpu.name}</td>
-                            <td>${proc.pid}</td>
-                            <td>${proc.process_name}</td>
-                            <td>${memUsed}</td>
-                            <td>${lxcId}</td>
-                            <td><strong>${lxcName}</strong></td>
-                            <td><strong>${dockerName}</strong></td>
-                        </tr>
-                    `
-                }
-            }
-            if (!hasProcesses) {
-                gpuProcessesBody.innerHTML = `<tr><td colspan="6">No GPU processes found</td></tr>`
-            }
-            document.getElementById('gpu-processes-tbody').replaceWith(gpuProcessesBody)
-
-            // 4. Update Temperatures
-            const tempsBody = document.createElement('tbody')
-            tempsBody.id = 'temps-tbody'
-            const temps = stats.temperatures || []
-            if (temps.length === 0) {
-                tempsBody.innerHTML = `<tr><td colspan="4">No temperature data available</td></tr>`
-            } else {
-                for (const t of temps) {
-                    tempsBody.innerHTML += `
-                        <tr>
-                            <td>${t.label}</td>
-                            <td>${t.current != null ? t.current.toFixed(1) : 'N/A'}</td>
-                            <td>${t.max != null ? t.max.toFixed(1) : 'N/A'}</td>
-                            <td>${t.critical != null ? t.critical.toFixed(1) : 'N/A'}</td>
-                        </tr>
-                    `
-                }
-            }
-            document.getElementById('temps-tbody').replaceWith(tempsBody)
-
-            // 5. Update Physical Disks
-            const disksBody = document.createElement('tbody')
-            disksBody.id = 'disks-tbody'
-            for (const d of (stats.disks || [])) {
-                disksBody.innerHTML += `
+                for (const proc of (gpu.processes ?? [])) {
+                    gpuProcsHtml.push(`
                     <tr>
-                        <td>${d.name}</td>
-                        <td>${d.mount_point}</td>
-                        <td>${d.file_system}</td>
-                        <td>${formatPercentage(d.stats.usage)}</td>
-                        <td>${humanFileSize(d.stats.used)} / ${humanFileSize(d.stats.total)}</td>
+                        <td>${gpu.name}</td>
+                        <td>${proc.pid}</td>
+                        <td>${proc.process_name}</td>
+                        <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
+                        <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
+                        <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
+                        <td><strong>${proc.cgroup_info.docker_container_name ?? 'N/A'}</strong></td>
                     </tr>
-                `
-            }
-            document.getElementById('disks-tbody').replaceWith(disksBody)
-
-            // 6. Update LXC Containers
-            const lxcBody = document.createElement('tbody')
-            lxcBody.id = 'lxc-tbody'
-            const lxcs = stats.proxmox.lxc || []
-            if (lxcs.length === 0) {
-                lxcBody.innerHTML = `<tr><td colspan="6">No LXC containers found</td></tr>`
-            } else {
-                for (const lxc of lxcs) {
-                    lxcBody.innerHTML += `
-                        <tr>
-                            <td>${lxc.vm_id}</td>
-                            <td><strong>${lxc.name}</strong></td>
-                            <td>${lxc.pid}</td>
-                            <td>${formatPercentage(lxc.base.cpu_usage)}</td>
-                            <td>${formatStorageStats(lxc.base.ram)}</td>
-                            <td>${formatStorageStats(lxc.disk.stats)}</td>
-                        </tr>
-                    `
+                `)
                 }
             }
-            document.getElementById('lxc-tbody').replaceWith(lxcBody)
+            dom.gpuProcesses.innerHTML = gpuProcsHtml.length > 0
+                ? gpuProcsHtml.join('')
+                : `<tr><td colspan="7">No GPU processes found</td></tr>`
 
-            // 7. Update CPU Cores
-            const cpusBody = document.createElement('tbody')
-            cpusBody.id = 'cpus-tbody'
-            for (const cpu of (stats.base.cpus || [])) {
-                cpusBody.innerHTML += `
-                    <tr>
-                        <td>${cpu.name}</td>
-                        <td>${cpu.vendor_id} ${cpu.brand}</td>
-                        <td>${cpu.frequency} MHz</td>
-                        <td>${formatPercentage(cpu.usage, false)}</td>
-                    </tr>
-                `
-            }
-            document.getElementById('cpus-tbody').replaceWith(cpusBody)
+            // 5. Update Temperatures
+            const temps = stats.temperatures ?? []
+            dom.temps.innerHTML = temps.length === 0
+                ? `<tr><td colspan="4">No temperature data available</td></tr>`
+                : temps.map(t => `
+                <tr>
+                    <td>${t.label}</td>
+                    <td>${t.current?.toFixed(1) ?? 'N/A'}</td>
+                    <td>${t.max?.toFixed(1) ?? 'N/A'}</td>
+                    <td>${t.critical?.toFixed(1) ?? 'N/A'}</td>
+                </tr>
+            `).join('')
 
-            // 8. Update Top Processes
-            const topProcBody = document.createElement('tbody')
-            topProcBody.id = 'top-processes-tbody'
-            const topProcesses = stats.processes || []
+            // 6. Update Physical Disks
+            const disks = stats.disks ?? []
+            dom.disks.innerHTML = disks.length === 0
+                ? `<tr><td colspan="5">No disk data available</td></tr>`
+                : disks.map(d => `
+                <tr>
+                    <td>${d.name}</td>
+                    <td>${d.mount_point}</td>
+                    <td>${d.file_system}</td>
+                    <td>${formatPercentage(d.stats?.usage)}</td>
+                    <td>${humanFileSize(d.stats?.used)} / ${humanFileSize(d.stats?.total)}</td>
+                </tr>
+            `).join('')
 
-            if (topProcesses.length === 0) {
-                topProcBody.innerHTML = `<tr><td colspan="4">No process data available</td></tr>`
-            } else {
-                for (const proc of topProcesses) {
-                    const lxcId = proc.lxc_vm_id != null ? proc.lxc_vm_id : 'Host'
-                    const lxcName = proc.lxc_name != null ? proc.lxc_name : 'N/A'
-                    const dockerName = proc.docker_container_name != null ? proc.docker_container_name : 'N/A'
+            // 7. Update LXC Containers
+            const lxcs = stats.proxmox?.lxc ?? []
+            dom.lxc.innerHTML = lxcs.length === 0
+                ? `<tr><td colspan="6">No LXC containers found</td></tr>`
+                : lxcs.map(lxc => `
+                <tr>
+                    <td>${lxc.vm_id}</td>
+                    <td><strong>${lxc.name}</strong></td>
+                    <td>${lxc.pid}</td>
+                    <td>${formatPercentage(lxc.base?.cpu_usage)}</td>
+                    <td>${formatStorageStats(lxc.base?.ram)}</td>
+                    <td>${formatStorageStats(lxc.disk?.stats)}</td>
+                </tr>
+            `).join('')
 
-                    topProcBody.innerHTML += `
-                        <tr>
-                            <td>${proc.pid}</td>
-                            <td><strong>${proc.name}</strong></td>
-                            <td>${formatPercentage(proc.cpu_usage, false)}</td>
-                            <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
-                            <td>${lxcId}</td>
-                            <td><strong>${lxcName}</strong></td>
-                            <td><strong>${dockerName}</strong></td>
-                        </tr>
-                    `
-                }
-            }
-            document.getElementById('top-processes-tbody').replaceWith(topProcBody)
+            // 8. Update CPU Cores
+            const cpus = stats.base?.cpus ?? []
+            dom.cpus.innerHTML = cpus.length === 0
+                ? `<tr><td colspan="4">No CPU data available</td></tr>`
+                : cpus.map(cpu => `
+                <tr>
+                    <td>${cpu.name}</td>
+                    <td>${cpu.vendor_id} ${cpu.brand}</td>
+                    <td>${cpu.frequency} MHz</td>
+                    <td>${formatPercentage(cpu.usage, false)}</td>
+                </tr>
+            `).join('')
+
+            // 9. Update Top Processes
+            const topProcesses = stats.processes ?? []
+            dom.topProcesses.innerHTML = topProcesses.length === 0
+                ? `<tr><td colspan="7">No process data available</td></tr>`
+                : topProcesses.map(proc => `
+                <tr>
+                    <td>${proc.pid}</td>
+                    <td><strong>${proc.name}</strong></td>
+                    <td>${formatPercentage(proc.cpu_usage, false)}</td>
+                    <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
+                    <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
+                    <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
+                    <td><strong>${proc.cgroup_info?.docker_container_name ?? 'N/A'}</strong></td>
+                </tr>
+            `).join('')
         })
-    }
-
-    document.addEventListener('DOMContentLoaded', listen)
+    })
 
     // --- Helper Functions ---
 
+    function insertSortedAndDedup(dataArray, newPoint) {
+        const len = dataArray.length
+
+        // Fast path: Array is empty, or the new point is chronologically newest
+        if (len === 0 || dataArray[len - 1].x < newPoint.x) {
+            dataArray.push(newPoint)
+            return
+        }
+
+        // Slow path: Data is out of order or a duplicate (SSE reconnect / old log)
+        // Iterate backwards because out-of-order points are usually recent
+        for (let i = len - 1; i >= 0; i--) {
+            if (dataArray[i].x === newPoint.x) {
+                // Deduplicate: overwrite with the newest payload for this timestamp
+                dataArray[i].y = newPoint.y
+                return
+            }
+            if (dataArray[i].x < newPoint.x) {
+                // We found the correct chronological spot, insert it here
+                dataArray.splice(i + 1, 0, newPoint)
+                return
+            }
+        }
+
+        // If we reach here, it's the oldest point we've ever seen
+        dataArray.unshift(newPoint)
+    }
+
     function formatPercentage(value, multiply = true) {
         if (value == null) return 'N/A'
-        // parseFloat strips trailing zeros after toFixed forces the 2 decimals
-        if (multiply) {
-            value = value * 100
-        }
-        return parseFloat(value.toFixed(2)) + '%'
+        return parseFloat((multiply ? value * 100 : value).toFixed(2)) + '%'
     }
 
     function formatStorageStats(storageObj, multiply = true) {
@@ -350,12 +523,11 @@
     function formatUptime(seconds) {
         if (seconds == null) return "N/A"
         const d = Math.floor(seconds / (3600 * 24))
-        const h = Math.floor(seconds % (3600 * 24) / 3600)
-        const m = Math.floor(seconds % 3600 / 60)
+        const h = Math.floor((seconds % (3600 * 24)) / 3600)
+        const m = Math.floor((seconds % 3600) / 60)
         return `${d}d ${h}h ${m}m`
     }
 
-    // Taken from https://stackoverflow.com/a/14919494
     function humanFileSize(bytes, si = false, dp = 1) {
         if (bytes == null) return "0 B"
         const thresh = si ? 1000 : 1024
