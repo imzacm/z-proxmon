@@ -10,6 +10,7 @@ mod monitor_log;
 mod nvidia;
 mod proxmox;
 mod structures;
+mod tapo;
 
 use std::task::Poll;
 
@@ -49,19 +50,29 @@ fn main() {
         .map(|s| s.parse::<u16>().unwrap())
         .unwrap_or(8080);
 
+    let tapo_ip = "192.168.0.80";
+    let tapo_email = "imzacm@gmail.com";
+    let tapo_password = "MEadlands1!";
+
     compio::runtime::Runtime::new()
         .expect("Failed to create compio runtime")
         .block_on(async move {
             let state: Arc<monitor::State> = Arc::default();
-            let mut monitor_future = std::pin::pin!(monitor::monitor(&state));
+            let tapo_client =
+                tapo::TapoClient::new(tapo_ip.into(), tapo_email.into(), tapo_password.into());
+            let mut monitor_future = std::pin::pin!(monitor::monitor(&state, Some(tapo_client)));
 
             // Poll once so it starts waiting for a listener - MonitorLog will be it's first
             // listener.
-            std::future::poll_fn(|cx| match monitor_future.as_mut().poll(cx) {
-                Poll::Ready(()) => panic!("Monitor future should not have finished after one poll"),
-                Poll::Pending => Poll::Ready(()),
-            })
-            .await;
+            for _ in 0..10 {
+                std::future::poll_fn(|cx| match monitor_future.as_mut().poll(cx) {
+                    Poll::Ready(()) => {
+                        panic!("Monitor future should not have finished after one poll")
+                    }
+                    Poll::Pending => Poll::Ready(()),
+                })
+                .await;
+            }
 
             let monitor_log = monitor_log::MonitorLog::new(state.clone())
                 .await

@@ -8,6 +8,7 @@ use z_sync::observable_lock::ObservableLock16;
 use crate::io_wait::IoWait;
 use crate::nvidia::fetch_gpu_stats;
 use crate::structures::{ProcessCGroupInfo, ProxmoxNodeStats, SystemStats};
+use crate::tapo::TapoClient;
 
 #[derive(Default)]
 pub struct State {
@@ -34,7 +35,7 @@ impl State {
     }
 }
 
-pub async fn monitor(state: &State) {
+pub async fn monitor(state: &State, mut tapo_client: Option<TapoClient>) {
     let mut system = sysinfo::System::new_all();
     let mut disks = sysinfo::Disks::new();
     let mut components = sysinfo::Components::new();
@@ -77,12 +78,28 @@ pub async fn monitor(state: &State) {
 
         let proxmox_future = ProxmoxNodeStats::get();
 
-        let (system_result, disks_result, components_results, io_wait_result, proxmox_result) = futures_util::join!(
+        let energy_usage_future = async {
+            if let Some(tapo_client) = &mut tapo_client {
+                Some(tapo_client.fetch_p110_energy().await)
+            } else {
+                None
+            }
+        };
+
+        let (
+            system_result,
+            disks_result,
+            components_results,
+            io_wait_result,
+            proxmox_result,
+            energy_usage_result,
+        ) = futures_util::join!(
             system_future,
             disks_future,
             components_future,
             io_wait_future,
-            proxmox_future
+            proxmox_future,
+            energy_usage_future
         );
         system = system_result.unwrap();
         disks = disks_result.unwrap();
@@ -114,6 +131,12 @@ pub async fn monitor(state: &State) {
             stats.update_system(&system);
             stats.update_disks(&disks);
             stats.update_components(&components);
+
+            match energy_usage_result {
+                Some(Ok(energy_usage)) => stats.energy_usage = Some(energy_usage),
+                Some(Err(error)) => eprintln!("Energy usage error: {error:?}"),
+                None => stats.energy_usage = None,
+            }
 
             stats.proxmox = proxmox;
             stats.gpus = gpus;

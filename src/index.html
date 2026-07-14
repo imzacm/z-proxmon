@@ -69,16 +69,31 @@
     <tbody id="overview-tbody"></tbody>
 </table>
 
+<h2>Energy</h2>
+<table>
+    <thead>
+    <tr>
+        <th>Current Power (W)</th>
+        <th>Today Energy (kWh)</th>
+        <th>Month Energy (kWh)</th>
+        <th>Today Runtime</th>
+        <th>Month Runtime</th>
+        <th>Local Time</th>
+    </tr>
+    </thead>
+    <tbody id="energy-tbody"></tbody>
+</table>
+
 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px; max-width: 1200px;">
     <h2 style="margin-bottom: 0; border-bottom: none;">Historical Performance</h2>
     <select id="timeRange" style="padding: 5px; font-size: 14px;">
-        <option value="60000">Last 1 Minute</option>
+        <option value="60000" selected>Last 1 Minute</option>
         <option value="120000">Last 2 Minutes</option>
         <option value="300000">Last 5 Minutes</option>
         <option value="600000">Last 10 Minutes</option>
         <option value="900000">Last 15 Minutes</option>
         <option value="1800000">Last 30 Minutes</option>
-        <option value="3600000" selected>Last 1 Hour</option>
+        <option value="3600000">Last 1 Hour</option>
         <option value="21600000">Last 6 Hours</option>
         <option value="86400000">Last 24 Hours</option>
     </select>
@@ -89,6 +104,9 @@
     </div>
     <div class="chart-box">
         <canvas id="ramChart"></canvas>
+    </div>
+    <div class="chart-box">
+        <canvas id="powerChart"></canvas>
     </div>
     <div class="chart-box">
         <canvas id="gpuChart"></canvas>
@@ -209,6 +227,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         const dom = {
             overview: document.getElementById('overview-tbody'),
+            energy: document.getElementById('energy-tbody'),
             gpus: document.getElementById('gpus-tbody'),
             gpuProcesses: document.getElementById('gpu-processes-tbody'),
             temps: document.getElementById('temps-tbody'),
@@ -222,9 +241,12 @@
         // --- Chart Setup ---
         let currentWindowMs = parseInt(dom.timeRange.value, 10)
         const MAX_HISTORY_MS = 86400000 // Keep a maximum of 24 hours in memory to prevent crashes
+        const RENDER_INTERVAL_MS = 200
 
-        // Track the latest timestamp received from the server
         let latestDataTime = Date.now()
+        let latestStats = null
+        let needsRender = false
+        let lastRenderTime = 0
 
         const chartColors = ['#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40', '#E7E9ED', '#8A2BE2', '#00FA9A']
         const getColor = (index) => chartColors[index % chartColors.length]
@@ -237,6 +259,8 @@
                 type: 'line',
                 data: {datasets: []},
                 options: {
+                    parsing: false,      // Turns off internal data parsing (massive speedup)
+                    normalized: true,    // Tells Chart.js the data is already sorted and clean
                     responsive: true,
                     animation: false,
                     interaction: {
@@ -266,17 +290,19 @@
 
         const cpuChart = createChart('cpuChart', 'Global CPU Usage (%)')
         const ramChart = createChart('ramChart', 'RAM Usage (%)')
+        const powerChart = createChart('powerChart', 'Wall Power (W)', false)
         const gpuChart = createChart('gpuChart', 'GPU Utilization (%)')
         const gpuMemChart = createChart('gpuMemChart', 'GPU VRAM Usage (%)')
         const tempChart = createChart('tempChart', 'Temperatures (°C)', false)
         const diskChart = createChart('diskChart', 'Disk Usage (%)')
 
-        const allCharts = [cpuChart, ramChart, gpuChart, gpuMemChart, tempChart, diskChart]
+        const allCharts = [cpuChart, ramChart, powerChart, gpuChart, gpuMemChart, tempChart, diskChart]
 
         cpuChart.data.datasets.push({label: 'CPU', data: [], borderColor: getColor(0), tension: 0.1})
         ramChart.data.datasets.push({label: 'RAM', data: [], borderColor: getColor(1), tension: 0.1})
+        powerChart.data.datasets.push({label: 'Power', data: [], borderColor: getColor(2), tension: 0.1})
 
-        // Instantly update chart zoom when dropdown changes, relative to the server's latest time
+        // Instantly update chart zoom when dropdown changes
         dom.timeRange.addEventListener('change', (e) => {
             currentWindowMs = parseInt(e.target.value, 10)
             const displayCutoff = latestDataTime - currentWindowMs
@@ -284,7 +310,7 @@
             allCharts.forEach(c => {
                 c.options.scales.x.min = displayCutoff
                 c.options.scales.x.max = latestDataTime
-                c.update()
+                c.update('none')
             })
         })
 
@@ -303,209 +329,285 @@
                     chart.data.datasets.push(dataset)
                 }
 
-                insertSortedAndDedup(dataset.data, { x: timestamp, y: valueFn(item) })
+                insertSortedAndDedup(dataset.data, {x: timestamp, y: valueFn(item)})
             })
         }
 
-
         // --- SSE Listener ---
-        const eventSource = new EventSource('sse')
+        let eventSource = null
 
-        eventSource.addEventListener('stats', event => {
-            const stats = JSON.parse(event.data)
-
-            // Extract and parse the server-side timestamp
-            if (stats.updated_at) {
-                // Handle Unix timestamp in seconds vs milliseconds or ISO Strings
-                if (typeof stats.updated_at === 'number' && stats.updated_at < 20000000000) {
-                    latestDataTime = stats.updated_at * 1000
-                } else {
-                    latestDataTime = new Date(stats.updated_at).getTime()
-                }
-            } else {
-                latestDataTime = Date.now() // Fallback
+        const initSse = historyMs => {
+            if (eventSource !== null) {
+                eventSource.close()
             }
 
-            // Define the visible window and the maximum memory window based on server time
+            // Clear existing chart data so we don't mix old arrays with new history
+            allCharts.forEach(c => {
+                c.data.datasets.forEach(ds => ds.data = [])
+                c.update('none')
+            })
+
+            // Connect with the new timeframe
+            eventSource = new EventSource(`/sse?history_ms=${historyMs}`)
+
+            eventSource.addEventListener('history', event => {
+                const statsArray = JSON.parse(event.data)
+
+                statsArray.forEach(stats => {
+                    // We only want to track the latest time and stats for the UI tables
+                    let timestamp = Date.now()
+                    if (stats.updated_at) {
+                        timestamp = (typeof stats.updated_at === 'number' && stats.updated_at < 20000000000)
+                            ? stats.updated_at * 1000
+                            : new Date(stats.updated_at).getTime()
+                    }
+
+                    latestDataTime = Math.max(latestDataTime, timestamp)
+                    latestStats = stats
+
+                    // Extract and format data points for charts directly
+                    insertSortedAndDedup(cpuChart.data.datasets[0].data, {x: timestamp, y: stats.base?.cpu_usage ?? 0})
+
+                    const ramPercent = stats.base?.ram ? (stats.base.ram.used / stats.base.ram.total) * 100 : 0
+                    insertSortedAndDedup(ramChart.data.datasets[0].data, {x: timestamp, y: ramPercent})
+
+                    const currentPowerW = stats.energy_usage?.current_power ? stats.energy_usage.current_power / 1000 : 0
+                    insertSortedAndDedup(powerChart.data.datasets[0].data, {x: timestamp, y: currentPowerW})
+
+                    updateDynamicChart(gpuChart, stats.gpus ?? [], 'name', g => g.utilization ?? 0, timestamp)
+                    updateDynamicChart(gpuMemChart, stats.gpus ?? [], 'name', g => g.memory?.usage ?? 0, timestamp)
+                    updateDynamicChart(tempChart, stats.temperatures ?? [], 'label', t => t.current ?? null, timestamp)
+                    updateDynamicChart(diskChart, stats.disks ?? [], 'name', d => (d.stats?.usage ?? 0) * 100, timestamp)
+                });
+
+                needsRender = true
+            });
+
+            eventSource.addEventListener('stats', event => {
+                const stats = JSON.parse(event.data)
+                latestStats = stats
+
+                if (stats.updated_at) {
+                    if (typeof stats.updated_at === 'number' && stats.updated_at < 20000000000) {
+                        latestDataTime = stats.updated_at * 1000
+                    } else {
+                        latestDataTime = new Date(stats.updated_at).getTime()
+                    }
+                } else {
+                    latestDataTime = Date.now() // Fallback
+                }
+
+                // 1. Update Chart Data
+                insertSortedAndDedup(
+                    cpuChart.data.datasets[0].data,
+                    {x: latestDataTime, y: stats.base?.cpu_usage ?? 0}
+                )
+
+                const ramPercent = stats.base?.ram ? (stats.base.ram.used / stats.base.ram.total) * 100 : 0
+                insertSortedAndDedup(
+                    ramChart.data.datasets[0].data,
+                    {x: latestDataTime, y: ramPercent}
+                )
+
+                const currentPowerW = stats.energy_usage?.current_power ? stats.energy_usage.current_power / 1000 : 0
+                insertSortedAndDedup(
+                    powerChart.data.datasets[0].data,
+                    {x: latestDataTime, y: currentPowerW}
+                )
+
+                updateDynamicChart(gpuChart, stats.gpus ?? [], 'name', g => g.utilization ?? 0, latestDataTime)
+                updateDynamicChart(gpuMemChart, stats.gpus ?? [], 'name', g => g.memory?.usage ?? 0, latestDataTime)
+                updateDynamicChart(tempChart, stats.temperatures ?? [], 'label', t => t.current ?? null, latestDataTime)
+                updateDynamicChart(diskChart, stats.disks ?? [], 'name', d => (d.stats?.usage ?? 0) * 100, latestDataTime)
+
+                needsRender = true
+            })
+        }
+
+        initSse(currentWindowMs)
+
+        // Update chart zoom AND fetch new data when dropdown changes
+        dom.timeRange.addEventListener('change', event => {
+            currentWindowMs = parseInt(event.target.value, 10)
+
+            // Reconnect to get the correct block of history
+            initSse(currentWindowMs)
+        })
+
+        function renderLoop(timestamp) {
+            requestAnimationFrame(renderLoop)
+
+            if (!needsRender || timestamp - lastRenderTime < RENDER_INTERVAL_MS || !latestStats) return
+
+            lastRenderTime = timestamp
+            needsRender = false
+            const stats = latestStats
+
             const displayCutoff = latestDataTime - currentWindowMs
             const memoryCutoff = latestDataTime - MAX_HISTORY_MS
-
-            // 1. Update Chart Data
-            insertSortedAndDedup(
-                cpuChart.data.datasets[0].data,
-                { x: latestDataTime, y: stats.base?.cpu_usage ?? 0 }
-            )
-            const ramPercent = stats.base?.ram ? (stats.base.ram.used / stats.base.ram.total) * 100 : 0
-            insertSortedAndDedup(
-                ramChart.data.datasets[0].data,
-                { x: latestDataTime, y: ramPercent }
-            )
-
-            updateDynamicChart(gpuChart, stats.gpus ?? [], 'name', g => g.utilization ?? 0, latestDataTime)
-            updateDynamicChart(gpuMemChart, stats.gpus ?? [], 'name', g => g.memory?.usage ?? 0, latestDataTime)
-            updateDynamicChart(tempChart, stats.temperatures ?? [], 'label', t => t.current ?? null, latestDataTime)
-            updateDynamicChart(diskChart, stats.disks ?? [], 'name', d => (d.stats?.usage ?? 0) * 100, latestDataTime)
 
             // Prune data and lock axes
             allCharts.forEach(c => {
                 c.options.scales.x.min = displayCutoff
                 c.options.scales.x.max = latestDataTime
 
-                // Shift data points that fall completely out of memory bounds
                 c.data.datasets.forEach(ds => {
                     while (ds.data.length > 0 && ds.data[0].x < memoryCutoff) {
                         ds.data.shift()
                     }
                 })
-                c.update()
+
+                c.update('none')
             })
 
             // 2. Update Node Overview
-            dom.overview.innerHTML = `
-            <tr>
-                <td>${formatUptime(stats.base?.uptime)}</td>
-                <td>${formatPercentage(stats.base?.cpu_usage, false)}</td>
-                <td>${formatPercentage(stats.proxmox?.io_delay, false)}</td>
-                <td>${formatStorageStats(stats.base?.ram)}</td>
-                <td>${formatStorageStats(stats.base?.swap)}</td>
-            </tr>
-            `
+            syncTable(dom.overview, [stats], s => `
+                <td>${formatUptime(s.base?.uptime)}</td>
+                <td>${formatPercentage(s.base?.cpu_usage, false)}</td>
+                <td>${formatPercentage(s.proxmox?.io_delay, false)}</td>
+                <td>${formatStorageStats(s.base?.ram)}</td>
+                <td>${formatStorageStats(s.base?.swap)}</td>
+            `, 5)
 
-            // 3. Update GPUs
-            const gpus = stats.gpus ?? []
-            dom.gpus.innerHTML = gpus.length === 0
-                ? `<tr><td colspan="5">No GPU data available</td></tr>`
-                : gpus.map(gpu => `
-                <tr>
-                    <td><strong>${gpu.name}</strong></td>
-                    <td>${formatPercentage(gpu.utilization, false)}</td>
-                    <td>${gpu.temperature ?? 'N/A'}</td>
-                    <td>${gpu.power_usage_watts != null ? gpu.power_usage_watts.toFixed(1) + 'W' : 'N/A'}</td>
-                    <td>${formatStorageStats(gpu.memory, false)}</td>
-                </tr>
-            `).join('')
+            // 3. Update Energy Table
+            syncTable(dom.energy, stats.energy_usage ? [stats.energy_usage] : [], e => {
+                const powerW = e.current_power != null ? (e.current_power / 1000).toFixed(1) + ' W' : 'N/A'
+                const todayKwh = e.today_energy != null ? (e.today_energy / 1000).toFixed(2) : 'N/A'
+                const monthKwh = e.month_energy != null ? (e.month_energy / 1000).toFixed(2) : 'N/A'
+                const todayRuntime = e.today_runtime != null ? formatRuntime(e.today_runtime) : 'N/A'
+                const monthRuntime = e.month_runtime != null ? formatRuntime(e.month_runtime) : 'N/A'
+                const localTime = e.local_time ? e.local_time.replace('T', ' ') : 'N/A'
 
-            // 4. Update GPU Processes
-            const gpuProcsHtml = []
-            for (const gpu of gpus) {
+                return `
+                    <td><strong>${powerW}</strong></td>
+                    <td>${todayKwh}</td>
+                    <td>${monthKwh}</td>
+                    <td>${todayRuntime}</td>
+                    <td>${monthRuntime}</td>
+                    <td>${localTime}</td>
+                `
+            }, 6)
+
+            // 4. Update GPUs
+            syncTable(dom.gpus, stats.gpus ?? [], gpu => `
+                <td><strong>${gpu.name}</strong></td>
+                <td>${formatPercentage(gpu.utilization, false)}</td>
+                <td>${gpu.temperature ?? 'N/A'}</td>
+                <td>${gpu.power_usage_watts != null ? gpu.power_usage_watts.toFixed(1) + 'W' : 'N/A'}</td>
+                <td>${formatStorageStats(gpu.memory, false)}</td>
+            `, 5)
+
+            // 5. Update GPU Processes
+            const gpuProcs = []
+            for (const gpu of (stats.gpus ?? [])) {
                 for (const proc of (gpu.processes ?? [])) {
-                    gpuProcsHtml.push(`
-                    <tr>
-                        <td>${gpu.name}</td>
-                        <td>${proc.pid}</td>
-                        <td>${proc.process_name}</td>
-                        <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
-                        <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
-                        <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
-                        <td><strong>${proc.cgroup_info.docker_container_name ?? 'N/A'}</strong></td>
-                    </tr>
-                `)
+                    gpuProcs.push({gpuName: gpu.name, ...proc})
                 }
             }
-            dom.gpuProcesses.innerHTML = gpuProcsHtml.length > 0
-                ? gpuProcsHtml.join('')
-                : `<tr><td colspan="7">No GPU processes found</td></tr>`
 
-            // 5. Update Temperatures
-            const temps = stats.temperatures ?? []
-            dom.temps.innerHTML = temps.length === 0
-                ? `<tr><td colspan="4">No temperature data available</td></tr>`
-                : temps.map(t => `
-                <tr>
-                    <td>${t.label}</td>
-                    <td>${t.current?.toFixed(1) ?? 'N/A'}</td>
-                    <td>${t.max?.toFixed(1) ?? 'N/A'}</td>
-                    <td>${t.critical?.toFixed(1) ?? 'N/A'}</td>
-                </tr>
-            `).join('')
+            syncTable(dom.gpuProcesses, gpuProcs, proc => `
+                <td>${proc.gpuName}</td>
+                <td>${proc.pid}</td>
+                <td>${proc.process_name}</td>
+                <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
+                <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
+                <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
+                <td><strong>${proc.cgroup_info?.docker_container_name ?? 'N/A'}</strong></td>
+            `, 7)
 
-            // 6. Update Physical Disks
-            const disks = stats.disks ?? []
-            dom.disks.innerHTML = disks.length === 0
-                ? `<tr><td colspan="5">No disk data available</td></tr>`
-                : disks.map(d => `
-                <tr>
-                    <td>${d.name}</td>
-                    <td>${d.mount_point}</td>
-                    <td>${d.file_system}</td>
-                    <td>${formatPercentage(d.stats?.usage)}</td>
-                    <td>${humanFileSize(d.stats?.used)} / ${humanFileSize(d.stats?.total)}</td>
-                </tr>
-            `).join('')
+            // 6. Update Temperatures
+            syncTable(dom.temps, stats.temperatures ?? [], t => `
+                <td>${t.label}</td>
+                <td>${t.current?.toFixed(1) ?? 'N/A'}</td>
+                <td>${t.max?.toFixed(1) ?? 'N/A'}</td>
+                <td>${t.critical?.toFixed(1) ?? 'N/A'}</td>
+            `, 4)
 
-            // 7. Update LXC Containers
-            const lxcs = stats.proxmox?.lxc ?? []
-            dom.lxc.innerHTML = lxcs.length === 0
-                ? `<tr><td colspan="6">No LXC containers found</td></tr>`
-                : lxcs.map(lxc => `
-                <tr>
-                    <td>${lxc.vm_id}</td>
-                    <td><strong>${lxc.name}</strong></td>
-                    <td>${lxc.pid}</td>
-                    <td>${formatPercentage(lxc.base?.cpu_usage)}</td>
-                    <td>${formatStorageStats(lxc.base?.ram)}</td>
-                    <td>${formatStorageStats(lxc.disk?.stats)}</td>
-                </tr>
-            `).join('')
+            // 7. Update Physical Disks
+            syncTable(dom.disks, stats.disks ?? [], d => `
+                <td>${d.name}</td>
+                <td>${d.mount_point}</td>
+                <td>${d.file_system}</td>
+                <td>${formatPercentage(d.stats?.usage)}</td>
+                <td>${humanFileSize(d.stats?.used)} / ${humanFileSize(d.stats?.total)}</td>
+            `, 5)
 
-            // 8. Update CPU Cores
-            const cpus = stats.base?.cpus ?? []
-            dom.cpus.innerHTML = cpus.length === 0
-                ? `<tr><td colspan="4">No CPU data available</td></tr>`
-                : cpus.map(cpu => `
-                <tr>
-                    <td>${cpu.name}</td>
-                    <td>${cpu.vendor_id} ${cpu.brand}</td>
-                    <td>${cpu.frequency} MHz</td>
-                    <td>${formatPercentage(cpu.usage, false)}</td>
-                </tr>
-            `).join('')
+            // 8. Update LXC Containers
+            syncTable(dom.lxc, stats.proxmox?.lxc ?? [], lxc => `
+                <td>${lxc.vm_id}</td>
+                <td><strong>${lxc.name}</strong></td>
+                <td>${lxc.pid}</td>
+                <td>${formatPercentage(lxc.base?.cpu_usage)}</td>
+                <td>${formatStorageStats(lxc.base?.ram)}</td>
+                <td>${formatStorageStats(lxc.disk?.stats)}</td>
+            `, 6)
 
-            // 9. Update Top Processes
-            const topProcesses = stats.processes ?? []
-            dom.topProcesses.innerHTML = topProcesses.length === 0
-                ? `<tr><td colspan="7">No process data available</td></tr>`
-                : topProcesses.map(proc => `
-                <tr>
-                    <td>${proc.pid}</td>
-                    <td><strong>${proc.name}</strong></td>
-                    <td>${formatPercentage(proc.cpu_usage, false)}</td>
-                    <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
-                    <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
-                    <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
-                    <td><strong>${proc.cgroup_info?.docker_container_name ?? 'N/A'}</strong></td>
-                </tr>
-            `).join('')
-        })
+            // 9. Update CPU Cores
+            syncTable(dom.cpus, stats.base?.cpus ?? [], cpu => `
+                <td>${cpu.name}</td>
+                <td>${cpu.vendor_id} ${cpu.brand}</td>
+                <td>${cpu.frequency} MHz</td>
+                <td>${formatPercentage(cpu.usage, false)}</td>
+            `, 4)
+
+            // 10. Update Top Processes
+            syncTable(dom.topProcesses, stats.processes ?? [], proc => `
+                <td>${proc.pid}</td>
+                <td><strong>${proc.name}</strong></td>
+                <td>${formatPercentage(proc.cpu_usage, false)}</td>
+                <td>${proc.memory_used != null ? humanFileSize(proc.memory_used) : 'N/A'}</td>
+                <td>${proc.cgroup_info?.lxc_vm_id ?? 'Host'}</td>
+                <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
+                <td><strong>${proc.cgroup_info?.docker_container_name ?? 'N/A'}</strong></td>
+            `, 7)
+        }
+
+        requestAnimationFrame(renderLoop)
     })
 
     // --- Helper Functions ---
 
+    function syncTable(tbody, items, htmlGenerator, colSpanFallback) {
+        if (!items || items.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="${colSpanFallback}">No data available</td></tr>`
+            return
+        }
+
+        while (tbody.rows.length < items.length) {
+            tbody.insertRow()
+        }
+
+        while (tbody.rows.length > items.length) {
+            tbody.deleteRow(-1)
+        }
+
+        for (let i = 0; i < items.length; i++) {
+            const newHTML = htmlGenerator(items[i])
+            if (tbody.rows[i].innerHTML !== newHTML) {
+                tbody.rows[i].innerHTML = newHTML
+            }
+        }
+    }
+
     function insertSortedAndDedup(dataArray, newPoint) {
         const len = dataArray.length
 
-        // Fast path: Array is empty, or the new point is chronologically newest
         if (len === 0 || dataArray[len - 1].x < newPoint.x) {
             dataArray.push(newPoint)
             return
         }
 
-        // Slow path: Data is out of order or a duplicate (SSE reconnect / old log)
-        // Iterate backwards because out-of-order points are usually recent
         for (let i = len - 1; i >= 0; i--) {
             if (dataArray[i].x === newPoint.x) {
-                // Deduplicate: overwrite with the newest payload for this timestamp
                 dataArray[i].y = newPoint.y
                 return
             }
             if (dataArray[i].x < newPoint.x) {
-                // We found the correct chronological spot, insert it here
                 dataArray.splice(i + 1, 0, newPoint)
                 return
             }
         }
 
-        // If we reach here, it's the oldest point we've ever seen
         dataArray.unshift(newPoint)
     }
 
@@ -526,6 +628,13 @@
         const h = Math.floor((seconds % (3600 * 24)) / 3600)
         const m = Math.floor((seconds % 3600) / 60)
         return `${d}d ${h}h ${m}m`
+    }
+
+    function formatRuntime(minutes) {
+        if (minutes == null) return "N/A"
+        const h = Math.floor(minutes / 60)
+        const m = minutes % 60
+        return `${h}h ${m}m`
     }
 
     function humanFileSize(bytes, si = false, dp = 1) {

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tapo::responses::EnergyUsageResult;
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageStats {
@@ -109,7 +110,7 @@ pub struct ProcessStats {
     pub cgroup_info: ProcessCGroupInfo,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStats {
     #[serde(with = "time::serde::timestamp::option")]
     pub updated_at: Option<time::OffsetDateTime>,
@@ -119,4 +120,5 @@ pub struct SystemStats {
     pub proxmox: ProxmoxNodeStats,
     pub gpus: Vec<GpuStats>,
     pub processes: Vec<ProcessStats>,
+    pub energy_usage: Option<EnergyUsageResult>,
 }

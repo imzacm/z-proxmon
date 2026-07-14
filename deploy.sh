@@ -5,7 +5,7 @@ set -Eeuo pipefail
 export CC=clang
 export CXX=clang
 export AR=llvm-ar
-export RUSTFLAGS="-Clink-arg=-fuse-ld=lld -C target-feature=+cmpxchg16b,+fxsr,+sse,+sse2,+sse3,+ssse3"
+export RUSTFLAGS="-Clink-arg=-fuse-ld=lld -C target-cpu=znver2"
 
 cargo build --release
 
