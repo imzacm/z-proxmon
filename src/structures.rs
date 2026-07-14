@@ -63,7 +63,7 @@ pub struct TemperatureStats {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProxmoxLxcStats {
     pub vm_id: u32,
-    pub pid: u32,
+    pub pid: Option<u32>,
     pub name: String,
     pub base: BaseSystemStats,
     pub disk: DiskStats,

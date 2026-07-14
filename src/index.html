@@ -536,7 +536,7 @@
             syncTable(dom.lxc, stats.proxmox?.lxc ?? [], lxc => `
                 <td>${lxc.vm_id}</td>
                 <td><strong>${lxc.name}</strong></td>
-                <td>${lxc.pid}</td>
+                <td>${lxc.pid ?? '-'}</td>
                 <td>${formatPercentage(lxc.base?.cpu_usage)}</td>
                 <td>${formatStorageStats(lxc.base?.ram)}</td>
                 <td>${formatStorageStats(lxc.disk?.stats)}</td>

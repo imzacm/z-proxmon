@@ -160,16 +160,13 @@ pub async fn monitor(state: &State, mut tapo_client: Option<TapoClient>) {
                 };
 
                 if let Some(lxc_vm_id) = cgroup_info.lxc_vm_id {
-                    let lxc_name = stats
+                    cgroup_info.lxc_name = stats
                         .proxmox
                         .lxc
                         .iter()
                         .find_map(
                             |l| if l.vm_id == lxc_vm_id { Some(l.name.clone()) } else { None },
-                        )
-                        .unwrap();
-
-                    cgroup_info.lxc_name = Some(lxc_name);
+                        );
                 }
 
                 let process = stats.processes.iter_mut().find(|p| p.pid == pid).unwrap();

@@ -54,19 +54,25 @@ where
 
 #[derive(Debug, Deserialize)]
 struct LxcItem {
+    // Runtime fields below are absent when a container is stopped, so they
+    // default to 0 / None instead of failing the whole deserialization.
+    #[serde(default)]
     cpu: u8,
     // cpus: u8,
+    #[serde(default)]
     disk: u64,
     // diskread: u64,
     // diskwrite: u64,
     maxdisk: u64,
     maxmem: u64,
     maxswap: u64,
+    #[serde(default)]
     mem: u64,
     name: String,
     // netin: u64,
     // netout: u64,
-    pid: u32,
+    #[serde(default)]
+    pid: Option<u32>,
     // pressurecpufull: String,
     // pressurecpusome: String,
     // pressureiofull: String,
@@ -74,8 +80,10 @@ struct LxcItem {
     // pressurememoryfull: String,
     // pressurememorysome: String,
     // status: String,
+    #[serde(default)]
     swap: u64,
     // tags: String,
+    #[serde(default)]
     uptime: u64,
     vmid: u32,
 }
