@@ -1,4 +1,3 @@
-use std::cell::{LazyCell, RefCell};
 use std::ffi::OsStr;
 use std::io::{Cursor, Write};
 use std::num::NonZeroUsize;
@@ -6,6 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use compio::io::AsyncBufRead;
+use z_sync::{Lazy, Lock16};
 
 use crate::structures::ProcessCGroupInfo;
 
@@ -97,12 +97,13 @@ async fn get_docker_container_name(
 
     const CAP: NonZeroUsize = NonZeroUsize::new(200).unwrap();
 
-    #[thread_local]
-    static CACHE: LazyCell<RefCell<Cache>> =
-        LazyCell::new(|| RefCell::new(lru::LruCache::new(CAP)));
+    // A process-wide cache shared across all runtime threads. `Lazy` defers the (non-const)
+    // `LruCache` allocation to first use, and `Lock16` provides async-aware interior mutability so
+    // waiters yield instead of parking a runtime thread.
+    static CACHE: Lazy<Lock16<Cache>> = Lazy::new(|| Lock16::new(lru::LruCache::new(CAP)));
 
     {
-        let mut cache = CACHE.borrow_mut();
+        let mut cache = CACHE.write_async().await;
         if let Some(name) = cache.get(docker_container_id) {
             return Ok(name.clone());
         }
@@ -128,7 +129,7 @@ async fn get_docker_container_name(
     let output = child.wait_with_output().await?;
 
     {
-        let mut cache = CACHE.borrow_mut();
+        let mut cache = CACHE.write_async().await;
         if let Some(name) = cache.get(docker_container_id) {
             return Ok(name.clone());
         }
@@ -149,7 +150,7 @@ async fn get_docker_container_name(
             String::from_utf8(stdout).map_err(|source| crate::Error::InvalidString { source })?;
 
         {
-            let mut cache = CACHE.borrow_mut();
+            let mut cache = CACHE.write_async().await;
             cache.put(docker_container_id.into(), name.clone());
         }
 

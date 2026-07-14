@@ -1,5 +1,4 @@
 #![deny(unused_imports, clippy::all)]
-#![feature(thread_local)]
 
 mod cgroup_info;
 mod get_stats;

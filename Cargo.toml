@@ -19,8 +19,8 @@ cyper-axum = { version = "0.9", features = ["http2"] }
 sysinfo = { version = "0.39", features = ["serde"] }
 nvml-wrapper = "0.12"
 
-z-sync = { git = "https://github.com/imzacm/z-sync.git", rev = "f533de87fdc246afe66bfcbfbfad556b49711e4d" }
-z-queue = { git = "https://github.com/imzacm/z-queue.git", rev = "7015e5d7de06c15a6a5c36e02619e3d3b0084005", features = ["triomphe", "stream"] }
+z-sync = { git = "https://github.com/imzacm/z-sync.git", rev = "97bdd25482fbee5dcb2038143681155c982e2b76", features = ["triomphe-arc"] }
+z-queue = { git = "https://github.com/imzacm/z-queue.git", rev = "be60f6ef29988b834af60716f3a18e49a0227265", features = ["triomphe", "stream"] }
 
 lru = "0.18"
 tempfile = "3.27"
