@@ -529,7 +529,7 @@
                 <td>${d.mount_point}</td>
                 <td>${d.file_system}</td>
                 <td>${formatPercentage(d.stats?.usage)}</td>
-                <td>${humanFileSize(d.stats?.used)} / ${humanFileSize(d.stats?.total)}</td>
+                <td>${humanFileSize(d.stats?.used)} / ${humanFileSize(d.stats?.total)}${remainingGiBSuffix(d.stats)}</td>
             `, 5)
 
             // 8. Update LXC Containers
@@ -635,6 +635,18 @@
         const h = Math.floor(minutes / 60)
         const m = minutes % 60
         return `${h}h ${m}m`
+    }
+
+    // When total capacity is measured in TiB, the TiB-rounded free figure is
+    // coarse, so surface the remaining space in GiB alongside it.
+    function remainingGiBSuffix(stats) {
+        if (!stats) return ""
+        const TiB = 1024 ** 4
+        if ((stats.total ?? 0) < TiB) return ""
+        const available = stats.available ?? (stats.total - stats.used)
+        if (available == null) return ""
+        const gib = available / (1024 ** 3)
+        return ` (${gib.toFixed(0)} GiB free)`
     }
 
     function humanFileSize(bytes, si = false, dp = 1) {
