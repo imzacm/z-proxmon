@@ -77,7 +77,8 @@ fn main() {
                 .await
                 .expect("Failed to create monitor log");
             let server_future = http_server::start_server(port, state.clone(), monitor_log);
+            let stall_future = monitor::watch_for_stalls(&state);
 
-            futures_util::join!(monitor_future, server_future);
+            futures_util::join!(monitor_future, server_future, stall_future);
         })
 }

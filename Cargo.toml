@@ -27,5 +27,5 @@ tempfile = "3.27"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 
-tokio = { version = "1", default-features = false, features = ["rt", "parking_lot"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time", "parking_lot"] }
 tapo = "0.9"
