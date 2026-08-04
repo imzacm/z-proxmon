@@ -19,6 +19,20 @@
             padding-bottom: 5px;
         }
 
+        /* Shown against a heading whose source has stopped answering, so a table that has quietly
+           stopped moving does not read as one that simply is not changing. */
+        .stale-badge {
+            font-size: 0.6em;
+            font-weight: normal;
+            vertical-align: middle;
+            margin-left: 10px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background-color: #fdecea;
+            border: 1px solid #f5c6cb;
+            color: #a33;
+        }
+
         table {
             border: 1px solid black;
             border-collapse: collapse;
@@ -55,7 +69,7 @@
 <body>
 <h1>Z-ProxMon Dashboard</h1>
 
-<h2>Node Overview</h2>
+<h2 data-source="base io_delay">Node Overview</h2>
 <table>
     <thead>
     <tr>
@@ -69,7 +83,7 @@
     <tbody id="overview-tbody"></tbody>
 </table>
 
-<h2>Energy</h2>
+<h2 data-source="energy">Energy</h2>
 <table>
     <thead>
     <tr>
@@ -122,7 +136,7 @@
     </div>
 </div>
 
-<h2>GPUs</h2>
+<h2 data-source="gpus">GPUs</h2>
 <table>
     <thead>
     <tr>
@@ -136,7 +150,7 @@
     <tbody id="gpus-tbody"></tbody>
 </table>
 
-<h2>GPU Processes</h2>
+<h2 data-source="gpus cgroups">GPU Processes</h2>
 <table>
     <thead>
     <tr>
@@ -152,7 +166,7 @@
     <tbody id="gpu-processes-tbody"></tbody>
 </table>
 
-<h2>Temperatures</h2>
+<h2 data-source="temperatures">Temperatures</h2>
 <table>
     <thead>
     <tr>
@@ -165,7 +179,7 @@
     <tbody id="temps-tbody"></tbody>
 </table>
 
-<h2>Physical Disks</h2>
+<h2 data-source="disks">Physical Disks</h2>
 <table>
     <thead>
     <tr>
@@ -179,7 +193,7 @@
     <tbody id="disks-tbody"></tbody>
 </table>
 
-<h2>LXC Containers</h2>
+<h2 data-source="lxc">LXC Containers</h2>
 <table>
     <thead>
     <tr>
@@ -194,7 +208,7 @@
     <tbody id="lxc-tbody"></tbody>
 </table>
 
-<h2>CPU Cores</h2>
+<h2 data-source="base">CPU Cores</h2>
 <table>
     <thead>
     <tr>
@@ -207,7 +221,7 @@
     <tbody id="cpus-tbody"></tbody>
 </table>
 
-<h2>Top 10 Processes (CPU)</h2>
+<h2 data-source="processes cgroups">Top 10 Processes (CPU)</h2>
 <table>
     <thead>
     <tr>
@@ -560,10 +574,74 @@
                 <td><strong>${proc.cgroup_info?.lxc_name ?? 'N/A'}</strong></td>
                 <td><strong>${proc.cgroup_info?.docker_container_name ?? 'N/A'}</strong></td>
             `, 7)
+
+            // 11. Flag the sections whose source has stopped answering
+            updateStaleBadges(stats)
         }
 
         requestAnimationFrame(renderLoop)
     })
+
+    // Each statistic is gathered by its own source at its own rate, so any one of them can fall
+    // behind while the rest carry on. The server decides what counts as behind, since only it
+    // knows how often each source is meant to answer.
+    const staleHeadings = document.querySelectorAll('h2[data-source]')
+
+    function updateStaleBadges(stats) {
+        const sources = stats.sources ?? {}
+        // Measured against the snapshot's own clock, never the browser's, so replayed history
+        // reads the same as live.
+        const takenAt = timestampToMillis(stats.updated_at) ?? Date.now()
+
+        for (const heading of staleHeadings) {
+            const stale = heading.dataset.source
+                .split(' ')
+                .map(name => sources[name])
+                .filter(status => status?.stale)
+
+            let badge = heading.querySelector('.stale-badge')
+
+            if (stale.length === 0) {
+                if (badge) badge.remove()
+                continue
+            }
+
+            if (!badge) {
+                badge = document.createElement('span')
+                badge.className = 'stale-badge'
+                heading.appendChild(badge)
+            }
+
+            // The one furthest behind is the one worth naming.
+            const oldest = stale.reduce((a, b) =>
+                (timestampToMillis(a.updated_at) ?? 0) <= (timestampToMillis(b.updated_at) ?? 0) ? a : b)
+            const updatedAt = timestampToMillis(oldest.updated_at)
+
+            const text = updatedAt == null
+                ? 'never updated'
+                : `last updated ${formatAge(Math.max(0, Math.round((takenAt - updatedAt) / 1000)))} ago`
+
+            if (badge.textContent !== text) badge.textContent = text
+        }
+    }
+
+    // Staleness is counted in seconds and minutes, which formatUptime's days-and-hours is no use
+    // for.
+    function formatAge(seconds) {
+        if (seconds < 60) return `${seconds}s`
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+    }
+
+    // The server sends whole seconds since the epoch, and null for a source that has never
+    // answered.
+    function timestampToMillis(timestamp) {
+        if (timestamp == null) return null
+        if (typeof timestamp === 'number') {
+            return timestamp < 20000000000 ? timestamp * 1000 : timestamp
+        }
+        return new Date(timestamp).getTime()
+    }
 
     // --- Helper Functions ---
 

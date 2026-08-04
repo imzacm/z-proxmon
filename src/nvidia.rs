@@ -1,17 +1,19 @@
-use std::collections::HashMap;
-
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 
-use crate::structures::{
-    GpuProcessStats, GpuStats, ProcessCGroupInfo, ProxmoxLxcStats, StorageStats,
-};
+use crate::structures::{GpuProcessStats, GpuStats, StorageStats};
 
-pub async fn fetch_gpu_stats(
+/// Every GPU, and what is running on it.
+///
+/// `names` is this source's own `System`, kept only to put a name to the handful of pids the
+/// driver reports - it is refreshed for those pids alone, so this asks the kernel for a few
+/// processes rather than all of them. Which container each of those pids belongs to is left to
+/// whoever assembles the page's picture, since that is a lookup against sections other sources
+/// publish and nothing this one should be made to wait for.
+pub fn fetch_gpu_stats(
     nvml: &Nvml,
-    processes: &HashMap<sysinfo::Pid, sysinfo::Process>,
-    lxc_list: &[ProxmoxLxcStats],
+    names: &mut sysinfo::System,
 ) -> Result<Vec<GpuStats>, crate::Error> {
     let mut gpus = Vec::new();
     let device_count = nvml.device_count()?;
@@ -43,32 +45,18 @@ pub async fn fetch_gpu_stats(
         }
 
         for proc in running_processes {
-            let pid = proc.pid;
-            // NVML gives us the process name if available
-            let process_name = processes
-                .get(&sysinfo::Pid::from_u32(pid))
-                .map_or("Unknown".into(), |p| p.name().to_string_lossy());
-
             let memory_used = match proc.used_gpu_memory {
                 UsedGpuMemory::Unavailable => None,
                 UsedGpuMemory::Used(used) => Some(used),
             };
 
-            // TODO: Parallelise this.
-            let mut cgroup_info = ProcessCGroupInfo::from_pid(pid).await?;
-
-            // If we found an ID, look up the name in our existing LXC stats list
-            if let Some(lxc_vm_id) = cgroup_info.lxc_vm_id
-                && let Some(lxc) = lxc_list.iter().find(|l| l.vm_id == lxc_vm_id)
-            {
-                cgroup_info.lxc_name = Some(lxc.name.clone());
-            }
-
             mapped_processes.push(GpuProcessStats {
-                pid,
-                process_name: process_name.into_owned(),
+                pid: proc.pid,
+                // Filled in below, once every pid on every device is known and they can be looked
+                // up in one refresh.
+                process_name: String::new(),
                 memory_used,
-                cgroup_info,
+                cgroup_info: Default::default(),
             });
         }
 
@@ -87,5 +75,35 @@ pub async fn fetch_gpu_stats(
         });
     }
 
+    fill_process_names(&mut gpus, names);
+
     Ok(gpus)
+}
+
+/// Put a name to every pid the driver reported, in one refresh for all of them.
+fn fill_process_names(gpus: &mut [GpuStats], names: &mut sysinfo::System) {
+    let pids: Vec<sysinfo::Pid> = gpus
+        .iter()
+        .flat_map(|gpu| gpu.processes.iter())
+        .map(|process| sysinfo::Pid::from_u32(process.pid))
+        .collect();
+
+    if pids.is_empty() {
+        return;
+    }
+
+    names.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&pids),
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+
+    for process in gpus.iter_mut().flat_map(|gpu| gpu.processes.iter_mut()) {
+        let name = names
+            .process(sysinfo::Pid::from_u32(process.pid))
+            .map_or("Unknown".into(), |p| p.name().to_string_lossy());
+
+        process.process_name.clear();
+        process.process_name.push_str(&name);
+    }
 }

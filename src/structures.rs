@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tapo::responses::EnergyUsageResult;
+use triomphe::Arc;
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageStats {
@@ -72,7 +73,7 @@ pub struct ProxmoxLxcStats {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProxmoxNodeStats {
     pub io_delay: f64,
-    pub lxc: Vec<ProxmoxLxcStats>,
+    pub lxc: Arc<Vec<ProxmoxLxcStats>>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,15 +111,66 @@ pub struct ProcessStats {
     pub cgroup_info: ProcessCGroupInfo,
 }
 
+/// When one independently-gathered section was last refreshed, and whether its source has fallen
+/// far enough behind its own cadence to be worth saying so on the page.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceStatus {
+    #[serde(with = "time::serde::timestamp::option")]
+    pub updated_at: Option<time::OffsetDateTime>,
+    pub stale: bool,
+}
+
+/// One entry per source that fills part of [`SystemStats`].
+///
+/// Each is gathered by its own task at its own rate, so any one of them can fall behind - or stop
+/// entirely, if whatever it asks never answers - while the rest carry on. This is what the page
+/// reads to say which of its tables it should no longer be believed.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceStatuses {
+    pub base: SourceStatus,
+    pub processes: SourceStatus,
+    pub disks: SourceStatus,
+    pub temperatures: SourceStatus,
+    pub io_delay: SourceStatus,
+    pub lxc: SourceStatus,
+    pub gpus: SourceStatus,
+    pub cgroups: SourceStatus,
+    pub energy: SourceStatus,
+}
+
+impl SourceStatuses {
+    /// Every status against the name the log and the page know it by.
+    pub fn named(&self) -> [(&'static str, &SourceStatus); 9] {
+        [
+            ("base", &self.base),
+            ("processes", &self.processes),
+            ("disks", &self.disks),
+            ("temperatures", &self.temperatures),
+            ("io_delay", &self.io_delay),
+            ("lxc", &self.lxc),
+            ("gpus", &self.gpus),
+            ("cgroups", &self.cgroups),
+            ("energy", &self.energy),
+        ]
+    }
+}
+
+/// The assembled picture the page and the log are handed.
+///
+/// The sections are shared pointers because they are gathered separately and most of them do not
+/// change from one publish to the next: a section nothing has touched costs a refcount bump here
+/// and another when [`ObservableLock`](z_sync::observable_lock::ObservableLock) clones this on its
+/// way out, where it used to cost two deep copies of every string and vector in it.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStats {
     #[serde(with = "time::serde::timestamp::option")]
     pub updated_at: Option<time::OffsetDateTime>,
-    pub base: BaseSystemStats,
-    pub disks: Vec<DiskStats>,
-    pub temperatures: Vec<TemperatureStats>,
+    pub sources: SourceStatuses,
+    pub base: Arc<BaseSystemStats>,
+    pub disks: Arc<Vec<DiskStats>>,
+    pub temperatures: Arc<Vec<TemperatureStats>>,
     pub proxmox: ProxmoxNodeStats,
-    pub gpus: Vec<GpuStats>,
-    pub processes: Vec<ProcessStats>,
+    pub gpus: Arc<Vec<GpuStats>>,
+    pub processes: Arc<Vec<ProcessStats>>,
     pub energy_usage: Option<EnergyUsageResult>,
 }

@@ -1,20 +1,17 @@
 use serde::Deserialize;
 
-use crate::structures::{
-    BaseSystemStats, DiskStats, ProxmoxLxcStats, ProxmoxNodeStats, StorageStats,
-};
+use crate::structures::{BaseSystemStats, DiskStats, ProxmoxLxcStats, StorageStats};
 
-impl ProxmoxNodeStats {
-    pub async fn get() -> Result<Self, crate::Error> {
-        let mut lxc = get_node_stats::<LxcJson>("localhost", "lxc").await?;
+/// The node's containers, as `pvesh` sees them.
+///
+/// Only the container list: the node's IO delay is read straight from `/proc/stat` by its own
+/// source, and the two are put back together when the page's picture is assembled.
+pub async fn get_lxc() -> Result<Vec<ProxmoxLxcStats>, crate::Error> {
+    let mut lxc = get_node_stats::<LxcJson>("localhost", "lxc").await?;
 
-        lxc.data.sort_unstable_by_key(|item| item.vmid);
+    lxc.data.sort_unstable_by_key(|item| item.vmid);
 
-        Ok(Self {
-            io_delay: 0.0,
-            lxc: lxc.data.into_iter().map(LxcItem::into_stats).collect(),
-        })
-    }
+    Ok(lxc.data.into_iter().map(LxcItem::into_stats).collect())
 }
 
 async fn get_node_stats<T>(node: &str, ty: &str) -> Result<T, crate::Error>

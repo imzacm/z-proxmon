@@ -11,8 +11,6 @@ mod proxmox;
 mod structures;
 mod tapo;
 
-use std::task::Poll;
-
 use triomphe::Arc;
 
 #[derive(Debug)]
@@ -59,26 +57,14 @@ fn main() {
             let state: Arc<monitor::State> = Arc::default();
             let tapo_client =
                 tapo::TapoClient::new(tapo_ip.into(), tapo_email.into(), tapo_password.into());
-            let mut monitor_future = std::pin::pin!(monitor::monitor(&state, Some(tapo_client)));
-
-            // Poll once so it starts waiting for a listener - MonitorLog will be it's first
-            // listener.
-            for _ in 0..10 {
-                std::future::poll_fn(|cx| match monitor_future.as_mut().poll(cx) {
-                    Poll::Ready(()) => {
-                        panic!("Monitor future should not have finished after one poll")
-                    }
-                    Poll::Pending => Poll::Ready(()),
-                })
-                .await;
-            }
 
             let monitor_log = monitor_log::MonitorLog::new(state.clone())
                 .await
                 .expect("Failed to create monitor log");
-            let server_future = http_server::start_server(port, state.clone(), monitor_log);
-            let stall_future = monitor::watch_for_stalls(&state);
 
-            futures_util::join!(monitor_future, server_future, stall_future);
+            let monitor_future = monitor::monitor(state.clone(), Some(tapo_client));
+            let server_future = http_server::start_server(port, state, monitor_log);
+
+            futures_util::join!(monitor_future, server_future);
         })
 }

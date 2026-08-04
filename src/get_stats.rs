@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::structures::{
     BaseSystemStats, CpuStats, DiskStats, ProcessCGroupInfo, ProcessStats, StorageStats,
-    SystemStats, TemperatureStats,
+    TemperatureStats,
 };
 
 impl StorageStats {
@@ -159,31 +159,34 @@ impl ProcessStats {
     }
 }
 
-impl SystemStats {
-    pub fn update_system(&mut self, system: &sysinfo::System) {
-        self.base.init_with_system(system);
+// Each of these fills a buffer its own source task owns and reuses, rather than a section of the
+// assembled `SystemStats`: the sections are gathered separately now, and the strings and vectors a
+// task has already allocated are worth keeping between rounds.
 
-        self.processes.resize(system.processes().len(), ProcessStats::default());
-        for (process, stats) in system.processes().values().zip(self.processes.iter_mut()) {
-            stats.init_with_process(process);
-        }
-        self.processes.sort_unstable_by(|a, b| {
-            b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        self.processes.truncate(10);
+pub fn fill_processes(processes: &mut Vec<ProcessStats>, system: &sysinfo::System) {
+    processes.resize(system.processes().len(), ProcessStats::default());
+    for (process, stats) in system.processes().values().zip(processes.iter_mut()) {
+        stats.init_with_process(process);
     }
+    processes.sort_unstable_by(|a, b| {
+        b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    processes.truncate(10);
+}
 
-    pub fn update_disks(&mut self, disks: &sysinfo::Disks) {
-        self.disks.resize(disks.len(), DiskStats::default());
-        for (disk, stats) in disks.iter().zip(self.disks.iter_mut()) {
-            stats.init_with_disk(disk);
-        }
+pub fn fill_disks(stats: &mut Vec<DiskStats>, disks: &sysinfo::Disks) {
+    stats.resize(disks.len(), DiskStats::default());
+    for (disk, stats) in disks.iter().zip(stats.iter_mut()) {
+        stats.init_with_disk(disk);
     }
+}
 
-    pub fn update_components(&mut self, components: &sysinfo::Components) {
-        self.temperatures.resize(components.len(), TemperatureStats::default());
-        for (component, stats) in components.iter().zip(self.temperatures.iter_mut()) {
-            stats.init_with_component(component);
-        }
+pub fn fill_temperatures(
+    temperatures: &mut Vec<TemperatureStats>,
+    components: &sysinfo::Components,
+) {
+    temperatures.resize(components.len(), TemperatureStats::default());
+    for (component, stats) in components.iter().zip(temperatures.iter_mut()) {
+        stats.init_with_component(component);
     }
 }

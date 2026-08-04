@@ -3,6 +3,7 @@ use std::io::{Cursor, Write};
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::Instant;
 
 use compio::io::AsyncBufRead;
 use z_sync::{Lazy, Lock16};
@@ -14,8 +15,10 @@ impl ProcessCGroupInfo {
         let mut info = get_cgroup_info_from_pid(pid).await?;
 
         if let Some(docker_container_id) = &info.docker_container_id {
-            let name = get_docker_container_name(info.lxc_vm_id, docker_container_id).await?;
-            info.docker_container_name = Some(name);
+            // A name we cannot get is worth carrying on without: the container id, the LXC it sits
+            // in and the process itself are all still worth showing.
+            info.docker_container_name =
+                get_docker_container_name(info.lxc_vm_id, docker_container_id).await;
         }
 
         Ok(info)
@@ -89,11 +92,28 @@ async fn get_cgroup_info_from_pid(pid: u32) -> Result<ProcessCGroupInfo, std::io
     Ok(ProcessCGroupInfo::default())
 }
 
+/// How long a container whose name could not be read is left alone before asking again.
+///
+/// `pct exec` into a container that is unwell can take a long time or never answer at all, and
+/// before this a failure was not remembered: the same lookup ran again on the very next pass over
+/// the same process, several times a second.
+const NAME_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What is known about one container id's name.
+enum CachedName {
+    /// Docker answered. A container id's name does not change, so this stands for the run.
+    Known(String),
+    /// The lookup failed, and is not worth trying again until this passes.
+    Failed { until: Instant },
+}
+
+/// The container's name, or `None` if docker will not say - which is not worth failing over, so
+/// the reason is logged here rather than handed back.
 async fn get_docker_container_name(
     lxc_vm_id: Option<u32>,
     docker_container_id: &str,
-) -> Result<String, crate::Error> {
-    type Cache = lru::LruCache<String, String>;
+) -> Option<String> {
+    type Cache = lru::LruCache<String, CachedName>;
 
     const CAP: NonZeroUsize = NonZeroUsize::new(200).unwrap();
 
@@ -104,11 +124,35 @@ async fn get_docker_container_name(
 
     {
         let mut cache = CACHE.write_async().await;
-        if let Some(name) = cache.get(docker_container_id) {
-            return Ok(name.clone());
+        match cache.get(docker_container_id) {
+            Some(CachedName::Known(name)) => return Some(name.clone()),
+            Some(CachedName::Failed { until }) if *until > Instant::now() => return None,
+            _ => {}
         }
     }
 
+    match run_docker_inspect(lxc_vm_id, docker_container_id).await {
+        Ok(name) => {
+            let mut cache = CACHE.write_async().await;
+            cache.put(docker_container_id.into(), CachedName::Known(name.clone()));
+            Some(name)
+        }
+        Err(error) => {
+            eprintln!("Failed to name docker container {docker_container_id}: {error:?}");
+            let mut cache = CACHE.write_async().await;
+            cache.put(
+                docker_container_id.into(),
+                CachedName::Failed { until: Instant::now() + NAME_RETRY_AFTER },
+            );
+            None
+        }
+    }
+}
+
+async fn run_docker_inspect(
+    lxc_vm_id: Option<u32>,
+    docker_container_id: &str,
+) -> Result<String, crate::Error> {
     let mut command = compio::process::Command::new("docker");
     if let Some(lxc_vm_id) = lxc_vm_id {
         command = compio::process::Command::new("pct");
@@ -128,13 +172,6 @@ async fn get_docker_container_name(
 
     let output = child.wait_with_output().await?;
 
-    {
-        let mut cache = CACHE.write_async().await;
-        if let Some(name) = cache.get(docker_container_id) {
-            return Ok(name.clone());
-        }
-    }
-
     if output.status.success() {
         let mut stdout = output.stdout;
 
@@ -146,15 +183,7 @@ async fn get_docker_container_name(
             stdout.pop();
         }
 
-        let name =
-            String::from_utf8(stdout).map_err(|source| crate::Error::InvalidString { source })?;
-
-        {
-            let mut cache = CACHE.write_async().await;
-            cache.put(docker_container_id.into(), name.clone());
-        }
-
-        return Ok(name);
+        return String::from_utf8(stdout).map_err(|source| crate::Error::InvalidString { source });
     }
 
     let stdout = String::from_utf8(output.stdout).unwrap_or_else(|error| {
