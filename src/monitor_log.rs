@@ -170,7 +170,7 @@ async fn log_updates(
         let stats_listener = state.stats.observe();
 
         {
-            let stats = state.stats.latest_value_async().await;
+            let stats = state.stats.latest_value();
             bincode::serde::encode_into_std_write(
                 &*stats,
                 &mut buffer,

@@ -106,7 +106,7 @@ async fn sse_handler(
             let stats_listener = state.stats.observe();
 
             {
-                let stats = state.stats.latest_value_async().await;
+                let stats = state.stats.latest_value();
                 let mut bytes = json.into_bytes();
                 serde_json::to_writer(&mut bytes, &*stats).unwrap();
                 json = unsafe { String::from_utf8_unchecked(bytes) };
